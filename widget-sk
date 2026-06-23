@@ -1,0 +1,180 @@
+/* ============================================================================
+   MAKKÉ SKLO — chat widget (для хостингу на GitHub)
+   ----------------------------------------------------------------------------
+   ЯК ПОЄДНАТИ З ВОРКЕРОМ:
+     1. Внизу під коментарем познач свій WORKER (URL Cloudflare Worker).
+        Віджет шле запити на WORKER + '/chat' і WORKER + '/payment'.
+        У воркері CORS уже відкритий, тож крос-домен працює.
+     2. Поклади цей файл у публічний GitHub-репозиторій (напр. makke-sklo-widget).
+     3. Підключи на сайт makkesklo.shop через jsDelivr або GitHub Pages:
+          jsDelivr (рекоменд.):
+            <script src="https://cdn.jsdelivr.net/gh/USER/REPO@main/widget.js" defer></script>
+            ⚠ jsDelivr кешує @main ~12 год. Після оновлення файлу зроби purge:
+              відкрий у браузері  https://purge.jsdelivr.net/gh/USER/REPO@main/widget.js
+            або підключай конкретний коміт:  @<commit-hash>  замість  @main
+          GitHub Pages (оновлюється за ~1 хв, без purge):
+            Settings → Pages → Deploy from branch (main) →
+            <script src="https://USER.github.io/REPO/widget.js" defer></script>
+     ⚠ raw.githubusercontent.com НЕ працює для <script> (віддається як text/plain
+        з nosniff і браузер блокує виконання). Використовуй jsDelivr або Pages.
+     4. Воркерів вбудований /widget.js більше не потрібен — ігноруй його,
+        сайт тягне цей GitHub-файл. /chat, /payment, /stripe-webhook лишаються у воркері.
+   ============================================================================ */
+(function () {
+  // ============== РЕДАГУЙ ТУТ ==============
+  var WORKER = 'https://bot-sk.metsukisutemi.workers.dev'; // ⚠ URL твого Cloudflare Worker (без / в кінці)
+  var ACCENT = '#0ea5b7';
+  var BRAND = 'Makké Sklo';
+  var PERSONA = 'Klára';
+  var TOOLTIP_MS = 8000;    // показ підказки біля іконки
+  var AUTOOPEN_MS = 30000;  // авто-відкриття чату
+  var GREETING = 'Dobrý deň! Som Klára z Makké Sklo. Pomôžem vám vybrať priehľadnú ochranu na stôl. Aký povrch chcete chrániť — drevo, sklo/lak alebo laminát?';
+  var QUICK = ['Chcem objednať', 'Aké sú ceny?', 'Ako to funguje?'];
+  // =========================================
+
+  if (window.__makkeSkloWidget) return; // захист від подвійного підключення
+  window.__makkeSkloWidget = true;
+  WORKER = WORKER.replace(/\/+$/, '');
+
+  var SID = 'sk-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  var messages = [{ role: 'assistant', content: GREETING }];
+  var opened = false, userTouched = false, sending = false;
+
+  function utm() {
+    var p = new URLSearchParams(location.search);
+    return { source: p.get('utm_source') || '', medium: p.get('utm_medium') || '', campaign: p.get('utm_campaign') || '' };
+  }
+  function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+  function num(n) { return (n == null) ? '' : Number(n).toFixed(2).replace('.', ','); }
+
+  /* ---------- стилі ---------- */
+  var css = document.createElement('style');
+  css.textContent =
+    '#sgw-btn{position:fixed;right:20px;bottom:20px;width:60px;height:60px;border-radius:50%;background:' + ACCENT + ';box-shadow:0 6px 20px rgba(0,0,0,.25);cursor:pointer;z-index:999999;display:flex;align-items:center;justify-content:center;animation:sgw-pulse 2s infinite}' +
+    '@keyframes sgw-pulse{0%{box-shadow:0 0 0 0 rgba(14,165,183,.5)}70%{box-shadow:0 0 0 14px rgba(14,165,183,0)}100%{box-shadow:0 0 0 0 rgba(14,165,183,0)}}' +
+    '#sgw-btn svg{width:30px;height:30px;fill:#fff}' +
+    '#sgw-tip{position:fixed;right:88px;bottom:34px;background:#fff;color:#1a1a1a;padding:10px 14px;border-radius:12px;box-shadow:0 4px 16px rgba(0,0,0,.15);font:14px Arial;max-width:220px;z-index:999999;display:none}' +
+    '#sgw-box{position:fixed;right:20px;bottom:20px;width:370px;max-width:calc(100vw - 24px);height:560px;max-height:calc(100vh - 40px);background:#fff;border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.3);z-index:1000000;display:none;flex-direction:column;overflow:hidden;font-family:Arial,sans-serif}' +
+    '#sgw-head{background:' + ACCENT + ';color:#fff;padding:14px 16px;font-weight:bold;display:flex;justify-content:space-between;align-items:center}' +
+    '#sgw-head span{font-size:13px;font-weight:normal;opacity:.85}#sgw-x{cursor:pointer;font-size:20px;line-height:1}' +
+    '#sgw-msgs{flex:1;overflow-y:auto;padding:14px;background:#f7f7f8}' +
+    '.sgw-m{margin:8px 0;display:flex}.sgw-m.u{justify-content:flex-end}' +
+    '.sgw-b{padding:9px 13px;border-radius:14px;max-width:80%;font-size:14px;line-height:1.45;white-space:pre-wrap;word-wrap:break-word}' +
+    '.sgw-m.a .sgw-b{background:#fff;border:1px solid #e5e5e5}.sgw-m.u .sgw-b{background:' + ACCENT + ';color:#fff}' +
+    '#sgw-foot{border-top:1px solid #eee;padding:10px;background:#fff}' +
+    '#sgw-quick{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}' +
+    '.sgw-q{background:#eef6f7;border:1px solid #d4e9ec;color:#0a6b78;border-radius:14px;padding:6px 11px;font-size:13px;cursor:pointer}' +
+    '#sgw-row{display:flex;gap:8px}#sgw-in{flex:1;border:1px solid #ddd;border-radius:10px;padding:10px;font-size:14px;outline:none}' +
+    '#sgw-send{background:' + ACCENT + ';color:#fff;border:none;border-radius:10px;padding:0 16px;cursor:pointer;font-size:14px}' +
+    '.sgw-pay-loading{background:#fff;border:1px dashed ' + ACCENT + ';border-radius:10px;padding:12px;text-align:center;color:#0a6b78;font-size:14px;margin:8px 0}' +
+    '.sgw-pay-ready{display:block;text-align:center;background:' + ACCENT + ';color:#fff;border-radius:10px;padding:13px;font-size:15px;text-decoration:none;margin:8px 0;font-weight:bold}' +
+    '.sgw-payrow{display:flex;gap:8px;margin:8px 0}.sgw-payb{flex:1;border:1px solid ' + ACCENT + ';background:#fff;color:' + ACCENT + ';border-radius:10px;padding:11px;font-size:14px;cursor:pointer;font-weight:bold}' +
+    '.sgw-cod{background:#eef6f7;border-radius:10px;padding:12px;font-size:14px;color:#0a6b78;margin:8px 0}';
+  document.head.appendChild(css);
+
+  /* ---------- іконка + підказка ---------- */
+  var btn = document.createElement('div'); btn.id = 'sgw-btn';
+  btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 5.9 2 10.7c0 2.6 1.3 4.9 3.4 6.5L4.5 22l4.9-2.5c.8.2 1.7.3 2.6.3 5.5 0 10-3.9 10-8.7C22 5.9 17.5 2 12 2z"/></svg>';
+  document.body.appendChild(btn);
+  var tip = document.createElement('div'); tip.id = 'sgw-tip'; tip.textContent = 'Pomôžem vybrať ochranu na stôl 👋';
+  document.body.appendChild(tip);
+
+  /* ---------- вікно чату ---------- */
+  var box = document.createElement('div'); box.id = 'sgw-box';
+  box.innerHTML =
+    '<div id="sgw-head"><div>' + esc(PERSONA) + ' · <span>' + esc(BRAND) + '</span></div><div id="sgw-x">×</div></div>' +
+    '<div id="sgw-msgs"></div>' +
+    '<div id="sgw-foot"><div id="sgw-quick"></div><div id="sgw-row"><input id="sgw-in" placeholder="Napíšte správu..."><button id="sgw-send">▶</button></div></div>';
+  document.body.appendChild(box);
+
+  var msgsEl = box.querySelector('#sgw-msgs'), inEl = box.querySelector('#sgw-in'), quickEl = box.querySelector('#sgw-quick');
+
+  function render() {
+    msgsEl.innerHTML = '';
+    messages.forEach(function (m) {
+      var row = document.createElement('div'); row.className = 'sgw-m ' + (m.role === 'user' ? 'u' : 'a');
+      row.innerHTML = '<div class="sgw-b">' + esc(m.content) + '</div>';
+      msgsEl.appendChild(row);
+    });
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+  function quickBtns() {
+    quickEl.innerHTML = '';
+    if (messages.length > 2) { quickEl.style.display = 'none'; return; }
+    quickEl.style.display = 'flex';
+    QUICK.forEach(function (q) {
+      var b = document.createElement('div'); b.className = 'sgw-q'; b.textContent = q;
+      b.onclick = function () { send(q); };
+      quickEl.appendChild(b);
+    });
+  }
+  function clearPaymentUi() {
+    var s = document.getElementById('sgw-pay-state'); if (s) s.remove();
+    document.querySelectorAll('.sgw-pay-loading,.sgw-pay-ready,.sgw-payrow,.sgw-cod').forEach(function (e) { e.remove(); });
+  }
+  function showPayChoice() {
+    clearPaymentUi();
+    var wrap = document.createElement('div'); wrap.id = 'sgw-pay-state'; wrap.className = 'sgw-payrow';
+    var card = document.createElement('button'); card.className = 'sgw-payb'; card.textContent = '💳 Kartou online'; card.onclick = function () { pay('online'); };
+    var cod = document.createElement('button'); cod.className = 'sgw-payb'; cod.textContent = '📦 Dobierka'; cod.onclick = function () { pay('cod'); };
+    wrap.appendChild(card); wrap.appendChild(cod);
+    msgsEl.appendChild(wrap); msgsEl.scrollTop = msgsEl.scrollHeight;
+  }
+  function pay(method) {
+    clearPaymentUi();
+    if (method === 'online') {
+      var load = document.createElement('div'); load.id = 'sgw-pay-state'; load.className = 'sgw-pay-loading';
+      load.textContent = 'Generujem odkaz na platbu...';
+      msgsEl.appendChild(load); msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+    fetch(WORKER + '/payment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SID, messages: messages, method: method, utm: utm() })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      clearPaymentUi();
+      if (method === 'cod') {
+        var c = document.createElement('div'); c.className = 'sgw-cod';
+        c.textContent = 'Ďakujeme! Objednávka na dobierku je prijatá' + (d.total ? (' — spolu ' + num(d.total) + ' €') : '') + '. Čoskoro sa vám ozveme.';
+        msgsEl.appendChild(c);
+      } else if (d.url) {
+        var a = document.createElement('a'); a.className = 'sgw-pay-ready'; a.href = d.url; a.target = '_blank'; a.rel = 'noopener';
+        a.textContent = 'Zaplatiť ' + (d.amount ? num(d.amount) : '') + ' € kartou';
+        msgsEl.appendChild(a);
+      } else {
+        var e = document.createElement('div'); e.className = 'sgw-cod';
+        e.textContent = 'Nepodarilo sa vytvoriť platbu, skúste znova alebo nám napíšte.';
+        msgsEl.appendChild(e);
+      }
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }).catch(function () { clearPaymentUi(); });
+  }
+
+  function send(text) {
+    if (sending || !text.trim()) return;
+    sending = true;
+    messages.push({ role: 'user', content: text }); inEl.value = ''; render(); quickBtns();
+    var typing = { role: 'assistant', content: '...' }; messages.push(typing); render();
+    fetch(WORKER + '/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SID, messages: messages.filter(function (m) { return m !== typing; }), utm: utm() })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      messages = messages.filter(function (m) { return m !== typing; });
+      var reply = d.reply || 'Prepáčte, skúste znova.';
+      var wantPay = /\[\[PAY\]\]/.test(reply);
+      reply = reply.replace(/\[\[PAY\]\]/g, '').trim();
+      messages.push({ role: 'assistant', content: reply }); render();
+      if (wantPay) showPayChoice();
+      sending = false;
+    }).catch(function () { messages = messages.filter(function (m) { return m !== typing; }); sending = false; render(); });
+  }
+
+  function open() { opened = true; userTouched = true; box.style.display = 'flex'; btn.style.display = 'none'; tip.style.display = 'none'; render(); quickBtns(); inEl.focus(); }
+  function close() { opened = false; userTouched = true; box.style.display = 'none'; btn.style.display = 'flex'; }
+  btn.onclick = open;
+  box.querySelector('#sgw-x').onclick = close;
+  box.querySelector('#sgw-send').onclick = function () { send(inEl.value); };
+  inEl.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(inEl.value); } });
+
+  setTimeout(function () { if (!userTouched && !opened) tip.style.display = 'block'; }, TOOLTIP_MS);
+  setTimeout(function () { if (!userTouched && !opened) open(); }, AUTOOPEN_MS);
+})();
