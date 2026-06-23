@@ -339,10 +339,21 @@
     ses.address=ses.pendingAddressParts.join(', ');
   }
 
+  function cleanAddressTail(value){
+    return String(value||'')
+      .replace(/\bČoskoro\s+sa\s+vám[\s\S]*$/i,'')
+      .replace(/\bCoskoro\s+sa\s+vam[\s\S]*$/i,'')
+      .replace(/\bOdkaz\s+na\s+platbu[\s\S]*$/i,'')
+      .replace(/\bOzveme\s+sa[\s\S]*$/i,'')
+      .replace(/\bZavoláme[\s\S]*$/i,'')
+      .replace(/[;,\s]+$/g,'')
+      .trim();
+  }
+
   function getAddressFromBot(t){
-    const m=String(t||'').match(/Adresa:\s*([\s\S]*?)(?:\n\s*\n|Odkaz na platbu|Ozveme|$)/i);
+    const m=String(t||'').match(/Adresa:\s*([\s\S]*?)(?:\n\s*(?:Čoskoro|Coskoro|Odkaz na platbu|Ozveme|Zavoláme)|\n\s*\n|$)/i);
     if(!m)return null;
-    const addr=m[1].split('\n').map(x=>x.trim()).filter(Boolean).join(', ').replace(/^[,;\s]+|[,;\s]+$/g,'').trim();
+    const addr=cleanAddressTail(m[1]).split('\n').map(x=>x.trim()).filter(Boolean).join(', ').replace(/^[,;\s]+|[,;\s]+$/g,'').trim();
     return addr||null;
   }
 
